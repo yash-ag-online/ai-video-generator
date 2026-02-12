@@ -21,7 +21,7 @@ import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { cn } from "./lib/utils";
 import { Alert, AlertDescription } from "./components/ui/alert";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const videoFormSchema = z.object({
   prompt: z
@@ -50,8 +50,7 @@ type VideoStatus =
   | "polling"
   | "completed"
   | "failed"
-  | "error"
-  | "pending";
+  | "error";
 
 function App() {
   const {
@@ -70,39 +69,68 @@ function App() {
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [videoLoaded, setVideoLoaded] = useState(false);
 
+  const pollingIntervalRef = useRef<number | null>(null);
+
   const orientation = watch("orientation");
 
-  const watchJob = (video_id: string) => {
-    setStatus("polling");
-    const eventSource = new EventSource(
-      `/api/video-status?video_id=${video_id}`,
-    );
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+      }
+    };
+  }, []);
 
-    eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      setStatus(data.status);
+  const stopPolling = () => {
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+  };
 
+  const pollVideoStatus = async (video_id: string) => {
+    try {
+      const response = await fetch(`/api/video-status?video_id=${video_id}`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        setStatus("error");
+        setErrorMsg(data.error || "Failed to check video status");
+        stopPolling();
+        return;
+      }
+
+      // Update status based on response
       if (data.status === "completed") {
+        setStatus("completed");
         setVideoUrl(data.video_url);
-        eventSource.close();
-      }
-
-      if (data.status === "failed") {
+        stopPolling();
+      } else if (data.status === "failed") {
+        setStatus("failed");
         setErrorMsg("Video generation failed. Please try again.");
-        eventSource.close();
+        stopPolling();
+      } else {
+        // Still processing (pending, processing, etc.)
+        setStatus("polling");
       }
-
-      if (data.status === "error") {
-        setErrorMsg("Something went wrong. Please try again.");
-        eventSource.close();
-      }
-    };
-
-    eventSource.onerror = () => {
+    } catch (err) {
       setStatus("error");
-      setErrorMsg("Connection lost. Please try again.");
-      eventSource.close();
-    };
+      setErrorMsg("Network error while checking status. Please try again.");
+      stopPolling();
+    }
+  };
+
+  const startPolling = (video_id: string) => {
+    setStatus("polling");
+
+    // Poll immediately first
+    pollVideoStatus(video_id);
+
+    // Then poll every 5 seconds
+    pollingIntervalRef.current = setInterval(() => {
+      pollVideoStatus(video_id);
+    }, 5000);
   };
 
   const onSubmit = async (data: VideoFormValues) => {
@@ -110,6 +138,7 @@ function App() {
     setVideoUrl("");
     setErrorMsg("");
     setVideoLoaded(false);
+    stopPolling(); // Clear any existing polling
 
     try {
       const response = await fetch(`/api/video-api`, {
@@ -134,22 +163,18 @@ function App() {
       }
 
       const { video_id } = result.data;
-      watchJob(video_id);
+      startPolling(video_id);
     } catch (err) {
       setStatus("error");
       setErrorMsg("Network error. Please try again.");
     }
   };
 
-  const isLoading = status === "generating" || status === "polling" ||
-    status === "pending";
+  const isLoading = status === "generating" || status === "polling";
 
   const statusMessage: Record<string, string> = {
     generating: "Sending your request to HeyGen...",
     polling: "Generating your video, this may take a few minutes...",
-    completed: "Your video is ready!",
-    failed: errorMsg,
-    error: errorMsg,
   };
 
   return (
@@ -325,10 +350,10 @@ function App() {
                   src={videoUrl}
                   controls
                   autoPlay
-                  onCanPlay={() => setVideoLoaded(true)} // ← fires when video is ready
+                  onCanPlay={() => setVideoLoaded(true)}
                   className={cn(
                     "w-full h-full object-cover",
-                    !videoLoaded && "hidden", // ← hide video element until loaded
+                    !videoLoaded && "hidden",
                   )}
                 />
               </>
