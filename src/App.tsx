@@ -1,4 +1,11 @@
-import { AlertCircle, Monitor, Smartphone, Sparkles } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle,
+  Monitor,
+  Smartphone,
+  Sparkles,
+  XCircle,
+} from "lucide-react";
 import { Button } from "./components/ui/button";
 import { ButtonGroup } from "./components/ui/button-group";
 import {
@@ -13,17 +20,15 @@ import z from "zod";
 import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { cn } from "./lib/utils";
-import { Alert } from "./components/ui/alert";
+import { Alert, AlertDescription } from "./components/ui/alert";
+import { useState } from "react";
 
 const videoFormSchema = z.object({
   prompt: z
     .string()
     .min(10, "Prompt must be at least 10 characters")
     .max(500, "Prompt must be under 500 characters"),
-  quality: z.enum(["4k", "1080", "720", "480"], {
-    message: "Please select a quality",
-  }),
-  duration: z.enum(["0.5-2 mins", "2-4 mins"], {
+  duration: z.enum(["30 sec", "1 min"], {
     message: "Please select a duration",
   }),
   orientation: z.enum(["landscape", "portrait"], {
@@ -35,10 +40,18 @@ type VideoFormValues = z.infer<typeof videoFormSchema>;
 
 const defaultValues: VideoFormValues = {
   prompt: "",
-  quality: "4k",
-  duration: "0.5-2 mins",
+  duration: "30 sec",
   orientation: "landscape",
 };
+
+type VideoStatus =
+  | "idle"
+  | "generating"
+  | "polling"
+  | "completed"
+  | "failed"
+  | "error"
+  | "pending";
 
 function App() {
   const {
@@ -52,12 +65,91 @@ function App() {
     defaultValues,
   });
 
+  const [status, setStatus] = useState<VideoStatus>("idle");
+  const [videoUrl, setVideoUrl] = useState<string>("");
+  const [errorMsg, setErrorMsg] = useState<string>("");
+  const [videoLoaded, setVideoLoaded] = useState(false);
+
   const orientation = watch("orientation");
 
-  // Mock submission – logs data and simulates a short async delay
+  const watchJob = (video_id: string) => {
+    setStatus("polling");
+    const eventSource = new EventSource(
+      `/api/video-status?video_id=${video_id}`,
+    );
+
+    eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      setStatus(data.status);
+
+      if (data.status === "completed") {
+        setVideoUrl(data.video_url);
+        eventSource.close();
+      }
+
+      if (data.status === "failed") {
+        setErrorMsg("Video generation failed. Please try again.");
+        eventSource.close();
+      }
+
+      if (data.status === "error") {
+        setErrorMsg("Something went wrong. Please try again.");
+        eventSource.close();
+      }
+    };
+
+    eventSource.onerror = () => {
+      setStatus("error");
+      setErrorMsg("Connection lost. Please try again.");
+      eventSource.close();
+    };
+  };
+
   const onSubmit = async (data: VideoFormValues) => {
-    await new Promise((resolve) => setTimeout(resolve, 800)); // fake network call
-    console.log("✅ Form submitted:", data);
+    setStatus("generating");
+    setVideoUrl("");
+    setErrorMsg("");
+    setVideoLoaded(false);
+
+    try {
+      const response = await fetch(`/api/video-api`, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          duration_sec: data.duration === "1 min" ? 60 : 30,
+          prompt: data.prompt,
+          orientation: data.orientation,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        setStatus("error");
+        setErrorMsg(result.error || "Failed to start video generation.");
+        return;
+      }
+
+      const { video_id } = result.data;
+      watchJob(video_id);
+    } catch (err) {
+      setStatus("error");
+      setErrorMsg("Network error. Please try again.");
+    }
+  };
+
+  const isLoading = status === "generating" || status === "polling" ||
+    status === "pending";
+
+  const statusMessage: Record<string, string> = {
+    generating: "Sending your request to HeyGen...",
+    polling: "Generating your video, this may take a few minutes...",
+    completed: "Your video is ready!",
+    failed: errorMsg,
+    error: errorMsg,
   };
 
   return (
@@ -69,14 +161,16 @@ function App() {
       <Alert className="bg-yellow-500/10">
         <AlertCircle />
         <p>
-          This is a personal project by Yash Agrawal (<a
+          This is a personal project by Yash Agrawal (
+          <a
             href="https://www.linkedin.com/in/yash-ag-online/"
             className="underline italic"
           >
             LinkedIn
-          </a>), created as part of his learning journey in AI engineering. It
-          is intended solely for educational and experimental purposes and is
-          not meant for commercial use.
+          </a>
+          ), created as part of his learning journey in AI engineering. It is
+          intended solely for educational and experimental purposes and is not
+          meant for commercial use.
           <br />
           <br />
           Yash Agrawal is not responsible for any incorrect, misleading, or
@@ -95,37 +189,10 @@ function App() {
             <Textarea
               placeholder="write your video description here..."
               {...register("prompt")}
-              {...register("prompt")}
             />
           </Field>
 
           <FieldGroup className="grid sm:grid-cols-2 md:grid-cols-3">
-            {/* Quality */}
-            <Controller
-              name="quality"
-              control={control}
-              render={({ field }) => (
-                <Field>
-                  <FieldLabel>Select Quality</FieldLabel>
-                  {errors.quality && (
-                    <FieldError>{errors.quality.message}</FieldError>
-                  )}
-                  <ButtonGroup>
-                    {(["4k", "1080", "720", "480"] as const).map((q) => (
-                      <Button
-                        key={q}
-                        type="button"
-                        variant={field.value === q ? "default" : "outline"}
-                        onClick={() => field.onChange(q)}
-                      >
-                        {q}
-                      </Button>
-                    ))}
-                  </ButtonGroup>
-                </Field>
-              )}
-            />
-
             {/* Duration */}
             <Controller
               name="duration"
@@ -137,7 +204,7 @@ function App() {
                     <FieldError>{errors.duration.message}</FieldError>
                   )}
                   <ButtonGroup>
-                    {(["0.5-2 mins", "2-4 mins"] as const).map((d) => (
+                    {(["30 sec", "1 min"] as const).map((d) => (
                       <Button
                         key={d}
                         type="button"
@@ -190,24 +257,97 @@ function App() {
 
             <Button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || isLoading}
               className="mt-auto col-span-full"
             >
               <Sparkles />
-              {isSubmitting ? "Generating…" : "Generate"}
+              {isLoading ? "Generating…" : "Generate"}
             </Button>
           </FieldGroup>
 
-          {/* Video preview — aspect ratio & max-width driven by orientation */}
+          {/* Status Alerts - Success */}
+          {status === "completed" && (
+            <Alert className="bg-green-500/10 border-green-500/20">
+              <CheckCircle className="h-4 w-4 text-green-500" />
+              <AlertDescription className="text-green-700 dark:text-green-400">
+                Your video is ready!
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {/* Status Alerts - Error/Failed */}
+          {(status === "failed" || status === "error") && (
+            <Alert className="bg-red-500/10 border-red-500/20">
+              <XCircle className="h-4 w-4 text-red-500" />
+              <AlertDescription className="text-red-700 dark:text-red-400">
+                {errorMsg}
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {/* Loading status message */}
+          {isLoading && (
+            <p className="text-sm text-center text-muted-foreground animate-pulse">
+              {statusMessage[status]}
+            </p>
+          )}
+
+          {/* Video preview */}
           <div
             className={cn(
-              "border bg-muted flex items-center justify-center text-muted-foreground text-sm transition-all duration-300",
+              "border bg-muted flex items-center justify-center text-muted-foreground text-sm transition-all duration-300 overflow-hidden",
               orientation === "landscape"
-                ? "w-full aspect-video" // 16:9 full width
-                : "mx-auto aspect-9/16 w-64", // 9:16 centered, fixed width
+                ? "w-full aspect-video"
+                : "mx-auto aspect-9/16 w-64",
             )}
           >
-            {orientation === "landscape" ? "16:9 Preview" : "9:16 Preview"}
+            {/* Loading spinner */}
+            {isLoading && (
+              <div className="flex flex-col items-center gap-2">
+                <div className="h-8 w-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+                <p className="text-xs text-muted-foreground">Please wait...</p>
+              </div>
+            )}
+
+            {/* Video */}
+            {status === "completed" && videoUrl && (
+              <>
+                {/* show spinner until video is ready to play */}
+                {!videoLoaded && (
+                  <div className="flex flex-col items-center gap-2">
+                    <div className="h-8 w-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+                    <p className="text-xs text-muted-foreground">
+                      Loading video...
+                    </p>
+                  </div>
+                )}
+                <video
+                  src={videoUrl}
+                  controls
+                  autoPlay
+                  onCanPlay={() => setVideoLoaded(true)} // ← fires when video is ready
+                  className={cn(
+                    "w-full h-full object-cover",
+                    !videoLoaded && "hidden", // ← hide video element until loaded
+                  )}
+                />
+              </>
+            )}
+
+            {/* Placeholder */}
+            {status === "idle" && (
+              <span>
+                {orientation === "landscape" ? "16:9 Preview" : "9:16 Preview"}
+              </span>
+            )}
+
+            {/* Error */}
+            {(status === "failed" || status === "error") && (
+              <div className="flex flex-col items-center gap-2 p-4 text-center">
+                <AlertCircle className="h-8 w-8 text-red-500" />
+                <p className="text-xs text-red-500">{errorMsg}</p>
+              </div>
+            )}
           </div>
         </FieldSet>
       </form>
